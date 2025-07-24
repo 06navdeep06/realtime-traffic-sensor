@@ -1,10 +1,32 @@
 import streamlit as st
+from streamlit.components.v1 import html
 import pandas as pd
 import time
 import os
 from road_network import get_road_network, get_edge_midpoints, update_graph_with_traffic
 from simulation import Simulation
 from visualization import plot_traffic_graph
+
+def add_watermark():
+    """Adds a subtle watermark to the bottom right of the page"""
+    watermark = """
+    <style>
+        .watermark {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            color: rgba(0, 0, 0, 0.1);
+            font-size: 24px;
+            font-weight: bold;
+            pointer-events: none;
+            transform: rotate(-15deg);
+            z-index: 1000;
+            user-select: none;
+        }
+    </style>
+    <div class="watermark">Navdeep</div>
+    """
+    st.markdown(watermark, unsafe_allow_html=True)
 
 st.set_page_config(layout="wide")
 st.title("AI-Powered Traffic Management Dashboard")
@@ -27,33 +49,33 @@ init_session_state()
 # --- Sidebar Controls ---
 with st.sidebar:
     st.header("System Controls")
-    api_key_input = st.text_input("TomTom API Key", value=st.session_state.api_key, type="password")
+    # Using the provided API key by default
+    st.session_state.api_key = "tEZ8WgFXLuAuDjHmB3AB5y89ue31PsGL"
     city_name = st.text_input("City Name", "Patan, Nepal")
     num_vehicles = st.slider("Number of Vehicles", 10, 500, 100)
 
-    if st.button("Initialize Simulation"):
-        st.session_state.api_key = api_key_input
-        if not st.session_state.api_key:
-            st.error("Please enter a TomTom API key.")
-        else:
-            with st.spinner(f"Loading road network for {city_name}..."):
-                st.session_state.graph = get_road_network(city_name)
-                sim = Simulation(st.session_state.graph, num_vehicles)
-                
-                # Load pre-trained Q-tables for all signals
-                q_tables_dir = "q_tables"
-                for signal_id, signal in sim.traffic_signals.items():
-                    q_table_path = os.path.join(q_tables_dir, f"q_table_{signal_id}.json")
-                    signal.agent.load_q_table(q_table_path)
-                
-                st.session_state.simulation = sim
-                st.session_state.running = True
-                st.session_state.last_update = time.time()
-            st.success("Initialization Complete. Live simulation running with trained agents.")
+    if st.button("Start Real-time Traffic Monitoring"):
+        with st.spinner(f"Loading real-time traffic data for {city_name}..."):
+            st.session_state.graph = get_road_network(city_name)
+            sim = Simulation(st.session_state.graph, num_vehicles)
+            
+            # Load pre-trained Q-tables for all signals
+            q_tables_dir = "q_tables"
+            for signal_id, signal in sim.traffic_signals.items():
+                q_table_path = os.path.join(q_tables_dir, f"q_table_{signal_id}.json")
+                signal.agent.load_q_table(q_table_path)
+            
+            st.session_state.simulation = sim
+            st.session_state.running = True
+            st.session_state.last_update = time.time()
+        st.success("Real-time traffic monitoring is now active. The system is now displaying live traffic data.")
 
     if st.button("Stop"):
         st.session_state.running = False
         st.info("Simulation stopped.")
+
+# --- Watermark ---
+add_watermark()
 
 # --- Main Dashboard Layout ---
 if not st.session_state.running:

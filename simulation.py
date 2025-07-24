@@ -133,7 +133,7 @@ class Simulation:
 
         # D. Calculate metrics
         avg_trip_time = sum(self.completed_trip_times) / len(self.completed_trip_times) if self.completed_trip_times else 0
-        signal_states = {nid: str(sig.green_lane) for nid, sig in self.traffic_signals.items()}
+        signal_states = {nid: str(sig.green_lane_index) for nid, sig in self.traffic_signals.items()}
 
         return {
             "step": self.step_count,
