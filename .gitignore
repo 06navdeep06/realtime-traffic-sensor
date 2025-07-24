@@ -1,0 +1,37 @@
+# Virtual Environment
+.venv/
+__pycache__/
+
+# Cache
+.cache/
+cache/
+
+# IDE specific files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python bytecode
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+
+# Local development settings
+.env
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env.local
+
+# Distribution / packaging
+*.egg-info/
+build/
+dist/
+*.egg

@@ -1,0 +1,10 @@
+osmnx
+geopandas
+matplotlib
+networkx
+jupyter
+pandas
+numpy
+scikit-learn
+requests
+streamlit
