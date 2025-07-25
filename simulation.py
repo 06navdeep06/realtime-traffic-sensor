@@ -16,12 +16,25 @@ class Vehicle:
         self.path = path
         self.current_node_index = 0
         self.start_step = start_step
-        self.end_step = -1 # -1 indicates not finished
+        self.end_step = -1  # -1 indicates not finished
+        self._current_edge = None  # Track the current edge the vehicle is on
 
     @property
     def current_location(self) -> int:
         """Return the current node the vehicle is at."""
+        if not self.path or self.current_node_index >= len(self.path):
+            return None
         return self.path[self.current_node_index]
+        
+    @property
+    def current_edge(self):
+        """Return the current edge the vehicle is on as (u, v, key)."""
+        if self._current_edge is None and self.current_node_index < len(self.path) - 1:
+            # If no current edge but path is valid, set the current edge
+            self._current_edge = (self.path[self.current_node_index], 
+                                self.path[self.current_node_index + 1], 
+                                0)  # Default key for OSMnx
+        return self._current_edge
 
     @property
     def is_active(self) -> bool:
@@ -36,22 +49,27 @@ class Vehicle:
         # Check if vehicle has reached the destination in this step
         if self.current_node_index >= len(self.path) - 1:
             self.end_step = current_step
+            self._current_edge = None
             return
 
         current_node = self.current_location
         next_node = self.path[self.current_node_index + 1]
+        
+        # Update current edge
+        self._current_edge = (current_node, next_node, 0)  # OSMNX uses 0 as default key
 
         # Check if the next node is an intersection with a traffic signal
         if next_node in traffic_signals:
-            # The lane is the edge from the current node to the next node
-            current_lane = (current_node, next_node, 0) # OSMNX adds a 0 for the edge key
-            if not traffic_signals[next_node].is_green(current_lane):
+            if not traffic_signals[next_node].is_green(self._current_edge):
                 return  # Stop for red light
 
+        # Move to the next node
         self.current_node_index += 1
+        
         # Check if vehicle has reached the destination after moving
         if self.current_node_index >= len(self.path) - 1:
             self.end_step = current_step
+            self._current_edge = None
 
     def __repr__(self):
         return (
@@ -98,38 +116,95 @@ class Simulation:
     def step(self):
         """Advance the simulation by one time step."""
         self.step_count += 1
+        
+        try:
+            # A. Calculate vehicle queues for all incoming lanes at intersections
+            vehicle_queues = defaultdict(int)
+            for vehicle in self.vehicles.values():
+                if not vehicle.is_active:
+                    continue
+                    
+                try:
+                    if vehicle.current_node_index < len(vehicle.path) - 1:
+                        current_node = vehicle.current_location
+                        next_node = vehicle.path[vehicle.current_node_index + 1]
+                        
+                        # Create both (u, v) and (u, v, key) versions for compatibility
+                        lane_with_key = (current_node, next_node, 0)  # OSMnx default key
+                        lane_without_key = (current_node, next_node)
+                        
+                        if next_node in self.intersections:
+                            vehicle_queues[lane_with_key] += 1
+                            vehicle_queues[lane_without_key] += 1  # For backward compatibility
+                except Exception as e:
+                    import logging
+                    logging.error(f"Error processing vehicle {vehicle.vehicle_id} in queue calculation: {str(e)}")
 
-        # A. Calculate vehicle queues for all incoming lanes at intersections
-        vehicle_queues = defaultdict(int)
-        for vehicle in self.vehicles.values():
-            if vehicle.is_active and vehicle.current_node_index < len(vehicle.path) - 1:
-                current_node = vehicle.current_location
-                next_node = vehicle.path[vehicle.current_node_index + 1]
-                if next_node in self.intersections:
-                    lane = (current_node, next_node, 0)
-                    vehicle_queues[lane] += 1
+            # B. Update all traffic signals based on the current graph state and queues
+            for node_id, signal in self.traffic_signals.items():
+                try:
+                    signal.update(self.graph, vehicle_queues)
+                except Exception as e:
+                    import logging
+                    logging.error(f"Error updating traffic signal at node {node_id}: {str(e)}")
 
-        # B. Update all traffic signals based on the current graph state and queues
-        for signal in self.traffic_signals.values():
-            signal.update(self.graph, vehicle_queues)
+            # C. Move vehicles and calculate edge congestion
+            active_vehicles = 0
+            edge_congestion = defaultdict(int)
+            
+            for vid, vehicle in list(self.vehicles.items()):  # Create a list to avoid modification during iteration
+                if not vehicle.is_active:
+                    continue
+                    
+                try:
+                    # Store previous state for debugging
+                    prev_location = vehicle.current_location
+                    prev_edge = getattr(vehicle, 'current_edge', None)
+                    
+                    # Move vehicle
+                    vehicle.move(self.traffic_signals, self.step_count)
+                    
+                    # Log movement for debugging
+                    if prev_location != vehicle.current_location:
+                        logging.debug(f"Vehicle {vid} moved from {prev_location} to {vehicle.current_location}")
+                        logging.debug(f"  Previous edge: {prev_edge}, New edge: {getattr(vehicle, 'current_edge', None)}")
 
-        # C. Move vehicles and calculate edge congestion
-        active_vehicles = 0
-        edge_congestion = defaultdict(int)
-        for vehicle in self.vehicles.values():
-            # Move vehicle
-            vehicle.move(self.traffic_signals, self.step_count)
-
-            # If vehicle is still active after move, count it and its congestion
-            if vehicle.is_active:
-                active_vehicles += 1
-                if vehicle.current_node_index < len(vehicle.path) - 1:
-                    current_node = vehicle.current_location
-                    next_node = vehicle.path[vehicle.current_node_index + 1]
-                    edge_congestion[(current_node, next_node)] += 1
-            # If vehicle just finished, record trip time
-            elif vehicle.end_step == self.step_count:
-                self.completed_trip_times.append(vehicle.end_step - vehicle.start_step)
+                    # If vehicle is still active after move, count it and its congestion
+                    if vehicle.is_active:
+                        active_vehicles += 1
+                        if vehicle.current_node_index < len(vehicle.path) - 1:
+                            current_node = vehicle.current_location
+                            next_node = vehicle.path[vehicle.current_node_index + 1]
+                            
+                            # Update congestion for both edge formats
+                            edge_with_key = (current_node, next_node, 0)
+                            edge_without_key = (current_node, next_node)
+                            edge_congestion[edge_with_key] += 1
+                            edge_congestion[edge_without_key] += 1  # For backward compatibility
+                    
+                    # If vehicle just finished, record trip time
+                    elif vehicle.end_step == self.step_count:
+                        trip_time = vehicle.end_step - vehicle.start_step
+                        self.completed_trip_times.append(trip_time)
+                        logging.info(f"Vehicle {vid} completed trip in {trip_time} steps")
+                        
+                        # Optionally remove completed vehicles to save memory
+                        # del self.vehicles[vid]
+                        
+                except Exception as e:
+                    import logging
+                    logging.error(f"Error moving vehicle {vid}: {str(e)}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    
+                    # Mark vehicle as inactive to prevent repeated errors
+                    vehicle.end_step = self.step_count
+                    
+        except Exception as e:
+            import logging
+            logging.error(f"Error in simulation step {self.step_count}: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
 
         # D. Calculate metrics
         avg_trip_time = sum(self.completed_trip_times) / len(self.completed_trip_times) if self.completed_trip_times else 0

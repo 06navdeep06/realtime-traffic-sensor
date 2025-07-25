@@ -46,30 +46,57 @@ class TrafficSignal:
         Update the agent and the signal state.
         This is the core logic loop for the RL agent.
         """
-        current_state = self._get_state(graph)
-        
-        # The reward is the negative sum of waiting vehicles on red lanes
-        reward = 0
-        for i, lane in enumerate(self.incoming_lanes):
-            if i != self.green_lane_index:
-                reward -= vehicle_queues.get(lane, 0)
+        try:
+            current_state = self._get_state(graph)
+            
+            # The reward is the negative sum of waiting vehicles on red lanes
+            reward = 0
+            for i, lane in enumerate(self.incoming_lanes):
+                if i != self.green_lane_index:
+                    # Handle both (u, v) and (u, v, key) formats in vehicle_queues
+                    queue_key = lane
+                    if len(lane) == 3 and lane[:2] in vehicle_queues:
+                        queue_key = lane[:2]
+                    reward -= vehicle_queues.get(queue_key, 0)
 
-        # Update Q-table with the experience from the last step
-        if self.last_state is not None:
-            self.agent.update_q_table(self.last_state, self.last_action, reward, current_state)
+            # Update Q-table with the experience from the last step
+            if self.last_state is not None:
+                self.agent.update_q_table(self.last_state, self.last_action, reward, current_state)
 
-        # Choose the next action (which lane to make green)
-        action = self.agent.get_action(current_state)
-        self.green_lane_index = action
-        
-        # Store current state and action for the next update
-        self.last_state = current_state
-        self.last_action = action
+            # Choose the next action (which lane to make green)
+            action = self.agent.get_action(current_state)
+            self.green_lane_index = action
+            
+            # Store current state and action for the next update
+            self.last_state = current_state
+            self.last_action = action
+            
+        except Exception as e:
+            import logging
+            logging.error(f"Error in TrafficSignal.update: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
 
-    def is_green(self, lane: Tuple[int, int]) -> bool:
+    def is_green(self, lane) -> bool:
         """
         Check if a specific incoming lane has a green light.
+        
+        Args:
+            lane: Can be either a tuple of (u, v) or (u, v, key) representing the edge
+            
+        Returns:
+            bool: True if the lane has a green light, False otherwise
         """
         if not self.incoming_lanes:
-            return True # No signals if no incoming lanes
-        return self.incoming_lanes[self.green_lane_index] == lane
+            return True  # No signals if no incoming lanes
+            
+        # Handle both (u, v) and (u, v, key) formats for backward compatibility
+        if isinstance(lane, tuple) and len(lane) >= 2:
+            lane_to_check = lane[:2]  # Just use (u, v) part for comparison
+            current_green = self.incoming_lanes[self.green_lane_index]
+            
+            # Compare (u, v) parts
+            return (lane_to_check[0] == current_green[0] and 
+                    lane_to_check[1] == current_green[1])
+                    
+        return False  # Invalid lane format
