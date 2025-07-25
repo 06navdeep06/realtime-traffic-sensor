@@ -3,9 +3,14 @@ from streamlit.components.v1 import html
 import pandas as pd
 import time
 import os
+import logging
 from road_network import get_road_network, get_edge_midpoints, update_graph_with_traffic
 from simulation import Simulation
 from visualization import plot_traffic_graph
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def add_watermark():
     """Adds a subtle watermark to the bottom right of the page"""
@@ -43,6 +48,8 @@ def init_session_state():
         st.session_state.api_key = ""
     if 'last_update' not in st.session_state:
         st.session_state.last_update = 0
+    if 'error_count' not in st.session_state:
+        st.session_state.error_count = 0
 
 init_session_state()
 
@@ -66,7 +73,22 @@ with st.sidebar:
             lat = st.text_input("Latitude (e.g., 27.7172):", value="27.7172")
         with col2:
             lon = st.text_input("Longitude (e.g., 85.3240):", value="85.3240")
-        city_name = f"{lat}, {lon}"
+        
+        # Validate coordinates
+        try:
+            lat_val = float(lat)
+            lon_val = float(lon)
+            if not (-90 <= lat_val <= 90):
+                st.error("Latitude must be between -90 and 90")
+                city_name = "27.7172, 85.3240"  # Default
+            elif not (-180 <= lon_val <= 180):
+                st.error("Longitude must be between -180 and 180")
+                city_name = "27.7172, 85.3240"  # Default
+            else:
+                city_name = f"{lat}, {lon}"
+        except ValueError:
+            st.error("Please enter valid numeric coordinates")
+            city_name = "27.7172, 85.3240"  # Default
     
     st.subheader("Simulation Settings")
     num_vehicles = st.slider("Number of Vehicles", 10, 500, 100)
@@ -82,36 +104,66 @@ with st.sidebar:
     if st.button("Start Real-time Traffic Monitoring"):
         with st.spinner(f"Loading real-time traffic data for {city_name}..."):
             try:
+                # Reset error count
+                st.session_state.error_count = 0
+                
                 st.session_state.graph = get_road_network(city_name.strip())
+                
+                if st.session_state.graph is None:
+                    raise ValueError("Failed to load road network")
+                    
+                if st.session_state.graph.number_of_nodes() == 0:
+                    raise ValueError("Road network has no nodes")
+                    
                 st.session_state.running = True
                 st.session_state.last_update = time.time()
                 st.success("Successfully loaded traffic data!")
+                
             except Exception as e:
+                logger.error(f"Error loading road network: {str(e)}")
                 st.error(f"Error: {str(e)}")
                 st.error("Could not load traffic data. Trying with default location...")
                 try:
                     st.session_state.graph = get_road_network("27.7172, 85.3240")  # Kathmandu
+                    
+                    if st.session_state.graph is None or st.session_state.graph.number_of_nodes() == 0:
+                        raise ValueError("Default location also failed")
+                        
                     st.session_state.running = True
                     st.session_state.last_update = time.time()
                     st.success("Successfully loaded default location (Kathmandu, Nepal).")
                 except Exception as e2:
+                    logger.error(f"Error loading default location: {str(e2)}")
                     st.error("Failed to load default location. Please try again later.")
                     st.stop()
-            sim = Simulation(st.session_state.graph, num_vehicles)
             
-            # Load pre-trained Q-tables for all signals
-            q_tables_dir = "q_tables"
-            for signal_id, signal in sim.traffic_signals.items():
-                q_table_path = os.path.join(q_tables_dir, f"q_table_{signal_id}.json")
-                signal.agent.load_q_table(q_table_path)
-            
-            st.session_state.simulation = sim
-            st.session_state.running = True
-            st.session_state.last_update = time.time()
-        st.success("Real-time traffic monitoring is now active. The system is now displaying live traffic data.")
+            # Create simulation
+            try:
+                sim = Simulation(st.session_state.graph, num_vehicles)
+                
+                # Load pre-trained Q-tables for all signals
+                q_tables_dir = "q_tables"
+                if os.path.exists(q_tables_dir):
+                    for signal_id, signal in sim.traffic_signals.items():
+                        if signal and hasattr(signal, 'agent') and signal.agent:
+                            q_table_path = os.path.join(q_tables_dir, f"q_table_{signal_id}.json")
+                            try:
+                                signal.agent.load_q_table(q_table_path)
+                            except Exception as e:
+                                logger.warning(f"Could not load Q-table for signal {signal_id}: {e}")
+                
+                st.session_state.simulation = sim
+                st.success("Real-time traffic monitoring is now active. The system is now displaying live traffic data.")
+                
+            except Exception as e:
+                logger.error(f"Error creating simulation: {str(e)}")
+                st.error(f"Error creating simulation: {str(e)}")
+                st.session_state.running = False
+                st.stop()
 
     if st.button("Stop"):
         st.session_state.running = False
+        st.session_state.error_count = 0
         st.info("Simulation stopped.")
 
 # --- Watermark ---
@@ -121,6 +173,12 @@ add_watermark()
 if not st.session_state.running:
     st.info("Please initialize the simulation using the controls in the sidebar.")
 else:
+    # Check for too many errors
+    if st.session_state.error_count > 10:
+        st.error("Too many errors occurred. Please restart the simulation.")
+        st.session_state.running = False
+        st.stop()
+        
     # Main visualization columns
     col1, col2 = st.columns([3, 1])
 
@@ -165,34 +223,46 @@ else:
         with st.container():
             st.markdown("### Traffic Summary")
             
-            # Calculate traffic metrics
-            edges = list(st.session_state.graph.edges(data=True))
-            if edges:
-                congested_roads = sum(1 for _, _, data in edges if data.get('congestion', 0) > 0.5)
-                total_roads = len(edges)
-                congestion_percent = (congested_roads / total_roads) * 100 if total_roads > 0 else 0
-                
-                # Traffic health indicator
-                if congestion_percent > 70:
-                    traffic_status = "🔴 High Congestion"
-                    status_color = "#ff4b4b"
-                elif congestion_percent > 40:
-                    traffic_status = "🟠 Moderate Traffic"
-                    status_color = "#ffa500"
+            try:
+                # Calculate traffic metrics
+                if st.session_state.graph and st.session_state.graph.number_of_edges() > 0:
+                    edges = list(st.session_state.graph.edges(data=True))
+                    if edges:
+                        congested_roads = sum(1 for _, _, data in edges 
+                                            if isinstance(data, dict) and 
+                                            isinstance(data.get('congestion', 0), (int, float)) and 
+                                            data.get('congestion', 0) > 0.5)
+                        total_roads = len(edges)
+                        congestion_percent = (congested_roads / total_roads) * 100 if total_roads > 0 else 0
+                        
+                        # Traffic health indicator
+                        if congestion_percent > 70:
+                            traffic_status = "🔴 High Congestion"
+                            status_color = "#ff4b4b"
+                        elif congestion_percent > 40:
+                            traffic_status = "🟠 Moderate Traffic"
+                            status_color = "#ffa500"
+                        else:
+                            traffic_status = "🟢 Smooth Traffic"
+                            status_color = "#2ecc71"
+                        
+                        st.markdown(f"""
+                        <div style='background-color:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:15px;'>
+                            <p style='font-size:16px; margin:0;'><strong>Network Status</strong></p>
+                            <p style='font-size:24px; margin:5px 0; color:{status_color};'>{traffic_status}</p>
+                            <p style='font-size:14px; margin:0;'>{congested_roads} of {total_roads} roads congested</p>
+                            <div style='height:8px; background-color:#e0e0e0; border-radius:4px; margin:8px 0;'>
+                                <div style='height:100%; width:{congestion_percent}%; background-color:{status_color}; border-radius:4px;'></div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.info("No traffic data available yet.")
                 else:
-                    traffic_status = "🟢 Smooth Traffic"
-                    status_color = "#2ecc71"
-                
-                st.markdown(f"""
-                <div style='background-color:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:15px;'>
-                    <p style='font-size:16px; margin:0;'><strong>Network Status</strong></p>
-                    <p style='font-size:24px; margin:5px 0; color:{status_color};'>{traffic_status}</p>
-                    <p style='font-size:14px; margin:0;'>{congested_roads} of {total_roads} roads congested</p>
-                    <div style='height:8px; background-color:#e0e0e0; border-radius:4px; margin:8px 0;'>
-                        <div style='height:100%; width:{congestion_percent}%; background-color:{status_color}; border-radius:4px;'></div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                    st.warning("No road network loaded.")
+            except Exception as e:
+                logger.error(f"Error calculating traffic metrics: {e}")
+                st.error("Error calculating traffic metrics.")
         
         # Simulation metrics
         with st.container():
@@ -218,78 +288,137 @@ else:
 
     # --- Live Update Loop ---
     while st.session_state.running:
-        sim = st.session_state.simulation
-        graph = st.session_state.graph
-
-        # Refresh real-world traffic data every 60 seconds
-        if time.time() - st.session_state.last_update > 60:
-            with st.spinner('Fetching latest traffic data from TomTom API...'):
-                midpoints = get_edge_midpoints(graph)
-                update_graph_with_traffic(graph, midpoints, st.session_state.api_key)
-                st.session_state.last_update = time.time()
-
-        # Advance simulation by one step
-        sim_data = sim.step()
-
-        # Update metrics
-        step_counter.metric("Simulation Step", f"{sim_data['step']:,}")
-        vehicle_counter.metric("Active Vehicles", f"{sim_data['active_vehicles']:,}")
-        avg_trip_time_counter.metric("Avg. Trip Time (steps)", f"{sim_data['avg_trip_time']:.2f}")
-
-        # Update signal states table
-        signal_df = pd.DataFrame(
-            sim_data["signal_states"].items(),
-            columns=['Intersection ID', 'Green Lane']
-        ).set_index('Intersection ID')
-        signal_states_table.dataframe(signal_df)
-
-        # Update traffic map with enhanced visualization
-        with map_placeholder.container():
-            # Create figure with larger size for better visibility
-            fig = plot_traffic_graph(graph, figsize=(12, 10))
+        try:
+            sim = st.session_state.simulation
+            graph = st.session_state.graph
             
-            # Add traffic signals to the map
-            ax = fig.axes[0]
-            if hasattr(sim, 'traffic_signals'):
-                for signal_id, signal in sim.traffic_signals.items():
-                    # Get the intersection node position
-                    node_pos = (graph.nodes[signal.intersection_node]['x'], 
-                              graph.nodes[signal.intersection_node]['y'])
+            if not sim or not graph:
+                st.error("Simulation or graph is not available.")
+                st.session_state.running = False
+                break
+
+            # Refresh real-world traffic data every 60 seconds
+            if time.time() - st.session_state.last_update > 60:
+                try:
+                    with st.spinner('Fetching latest traffic data from TomTom API...'):
+                        midpoints = get_edge_midpoints(graph)
+                        if midpoints:
+                            update_graph_with_traffic(graph, midpoints, st.session_state.api_key)
+                        st.session_state.last_update = time.time()
+                except Exception as e:
+                    logger.warning(f"Error updating traffic data: {e}")
+                    st.session_state.error_count += 1
+
+            # Advance simulation by one step
+            try:
+                sim_data = sim.step()
+                
+                if not isinstance(sim_data, dict):
+                    raise ValueError("Invalid simulation data returned")
                     
-                    # Plot the traffic signal
-                    signal_color = 'green' if signal.green_lane_index is not None else 'red'
-                    ax.plot(node_pos[0], node_pos[1], 'o', 
-                           markersize=15, 
-                           markerfacecolor=signal_color,
-                           markeredgecolor='white',
-                           markeredgewidth=1.5,
-                           alpha=0.9,
-                           zorder=10)
-                    
-                    # Add signal ID as text
-                    ax.text(node_pos[0], node_pos[1], str(signal_id), 
-                           color='white', 
-                           fontsize=8,
-                           ha='center', 
-                           va='center',
-                           fontweight='bold')
-            
-            # Add a title with update time
-            ax.set_title(f"Live Traffic - {time.strftime('%H:%M:%S')}", 
-                        fontsize=12, pad=15, fontweight='bold')
-            
-            # Display the figure
-            st.pyplot(fig, use_container_width=True)
-            
-            # Add a small caption with last update time
-            st.caption(f"Last updated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Add a small note about the visualization
-            st.caption("""
-            💡 **Tip**: The map shows real-time traffic conditions. 
-            - Thicker, redder lines indicate heavier traffic.
-            - Blue circles represent intersections with traffic signals.
-            """)
+            except Exception as e:
+                logger.error(f"Error in simulation step: {e}")
+                st.session_state.error_count += 1
+                st.error(f"Simulation error: {str(e)}")
+                continue
 
-        # Control the loop speed
-        time.sleep(2) # Refresh every 2 seconds
+            # Update metrics
+            try:
+                step_counter.metric("Simulation Step", f"{sim_data.get('step', 0):,}")
+                vehicle_counter.metric("Active Vehicles", f"{sim_data.get('active_vehicles', 0):,}")
+                avg_trip_time = sim_data.get('avg_trip_time', 0)
+                avg_trip_time_counter.metric("Avg. Trip Time (steps)", f"{avg_trip_time:.2f}")
+            except Exception as e:
+                logger.warning(f"Error updating metrics: {e}")
+
+            # Update signal states table
+            try:
+                signal_states = sim_data.get("signal_states", {})
+                if signal_states:
+                    signal_df = pd.DataFrame(
+                        signal_states.items(),
+                        columns=['Intersection ID', 'Green Lane']
+                    ).set_index('Intersection ID')
+                    signal_states_table.dataframe(signal_df)
+                else:
+                    signal_states_table.info("No traffic signals active.")
+            except Exception as e:
+                logger.warning(f"Error updating signal states: {e}")
+
+            # Update traffic map with enhanced visualization
+            try:
+                with map_placeholder.container():
+                    # Create figure with larger size for better visibility
+                    fig = plot_traffic_graph(graph, figsize=(12, 10))
+                    
+                    if fig and hasattr(fig, 'axes') and fig.axes:
+                        # Add traffic signals to the map
+                        ax = fig.axes[0]
+                        if hasattr(sim, 'traffic_signals') and sim.traffic_signals:
+                            for signal_id, signal in sim.traffic_signals.items():
+                                try:
+                                    if not signal or not hasattr(signal, 'intersection_node'):
+                                        continue
+                                        
+                                    # Get the intersection node position
+                                    if signal.intersection_node in graph.nodes:
+                                        node_data = graph.nodes[signal.intersection_node]
+                                        if 'x' in node_data and 'y' in node_data:
+                                            node_pos = (node_data['x'], node_data['y'])
+                                            
+                                            # Plot the traffic signal
+                                            signal_color = 'green' if hasattr(signal, 'green_lane_index') and signal.green_lane_index is not None else 'red'
+                                            ax.plot(node_pos[0], node_pos[1], 'o', 
+                                                   markersize=15, 
+                                                   markerfacecolor=signal_color,
+                                                   markeredgecolor='white',
+                                                   markeredgewidth=1.5,
+                                                   alpha=0.9,
+                                                   zorder=10)
+                                            
+                                            # Add signal ID as text
+                                            ax.text(node_pos[0], node_pos[1], str(signal_id), 
+                                                   color='white', 
+                                                   fontsize=8,
+                                                   ha='center', 
+                                                   va='center',
+                                                   fontweight='bold')
+                                except Exception as e:
+                                    logger.warning(f"Error plotting signal {signal_id}: {e}")
+                        
+                        # Add a title with update time
+                        ax.set_title(f"Live Traffic - {time.strftime('%H:%M:%S')}", 
+                                    fontsize=12, pad=15, fontweight='bold')
+                    
+                    # Display the figure
+                    st.pyplot(fig, use_container_width=True)
+                    
+                    # Add a small caption with last update time
+                    st.caption(f"Last updated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    # Add a small note about the visualization
+                    st.caption("""
+                    💡 **Tip**: The map shows real-time traffic conditions. 
+                    - Thicker, redder lines indicate heavier traffic.
+                    - Blue circles represent intersections with traffic signals.
+                    """)
+                    
+            except Exception as e:
+                logger.error(f"Error updating traffic map: {e}")
+                st.session_state.error_count += 1
+                map_placeholder.error(f"Error displaying map: {str(e)}")
+
+            # Control the loop speed
+            time.sleep(2) # Refresh every 2 seconds
+            
+        except Exception as e:
+            logger.error(f"Critical error in main loop: {e}")
+            st.session_state.error_count += 1
+            st.error(f"Critical error: {str(e)}")
+            
+            if st.session_state.error_count > 5:
+                st.error("Too many errors. Stopping simulation.")
+                st.session_state.running = False
+                break
+            
+            time.sleep(5)  # Wait longer on error
